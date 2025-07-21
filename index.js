@@ -1,5 +1,5 @@
 require('dotenv').config();
-const { Client, GatewayIntentBits, EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, SlashCommandBuilder, REST, Routes, PermissionFlagsBits, AttachmentBuilder, ModalBuilder, TextInputBuilder, TextInputStyle } = require('discord.js');
+const { Client, GatewayIntentBits, EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, SlashCommandBuilder, REST, Routes, PermissionFlagsBits, AttachmentBuilder, ModalBuilder, TextInputBuilder, TextInputStyle, StringSelectMenuBuilder } = require('discord.js');
 const express = require('express');
 const fs = require('fs').promises;
 const path = require('path');
@@ -24,14 +24,6 @@ const client = new Client({
         GatewayIntentBits.GuildMembers
     ]
 });
-
-// Channel IDs from specification
-const CHANNELS = {
-    GIVEAWAYS: '1393431028562919434', // 🎉┃giveaways
-    WINNERS: '1396578011834355952',   // 🏆┃winners  
-    ANNOUNCEMENTS: '1392122107390857266', // announcement channel
-    TICKETS: '1393431028562919434'    // ticket channel
-};
 
 const ROLES = {
     GIVEAWAY: '1396583158815789106',   // giveaway role
@@ -59,7 +51,6 @@ const files = {
 async function ensureDataDir() {
     try {
         await fs.mkdir(DATA_DIR, { recursive: true });
-        // Initialize files if they don't exist
         for (const file of Object.values(files)) {
             try {
                 await fs.access(file);
@@ -91,7 +82,6 @@ async function loadData() {
     try {
         await ensureDataDir();
         
-        // Load giveaways
         try {
             const giveawaysData = await fs.readFile(files.giveaways, 'utf8');
             activeGiveaways = new Map(JSON.parse(giveawaysData || '[]'));
@@ -101,7 +91,6 @@ async function loadData() {
             activeGiveaways = new Map();
         }
 
-        // Load global image
         try {
             const imageData = await fs.readFile(files.globalImage, 'utf8');
             globalImage = JSON.parse(imageData || '{}').globalImage;
@@ -110,7 +99,6 @@ async function loadData() {
             console.log('No global image data found');
         }
 
-        // Load counter
         try {
             const counterData = await fs.readFile(files.counter, 'utf8');
             giveawayCounter = JSON.parse(counterData || '{}').counter || 0;
@@ -200,7 +188,7 @@ function createWinnerDMEmbed(giveaway, allWinners) {
             { name: '🎁 Item', value: `${giveaway.item}${giveaway.quantity > 1 ? ` ×${giveaway.quantity}` : ''}`, inline: false },
             { name: '👑 Winners', value: allWinners.map(id => `<@${id}>`).join(', '), inline: false },
             { name: '⏰ Giveaway Duration', value: formatDuration(giveaway.duration), inline: false },
-            { name: '📬 Next Steps', value: `Please open a ticket in this channel: <#${CHANNELS.TICKETS}>\nand mention that you won to claim your item.`, inline: false }
+            { name: '📬 Next Steps', value: `Please open a ticket in this channel: <#${giveaway.channelId || '1393431028562919434'}>\nand mention that you won to claim your item.`, inline: false }
         )
         .setTimestamp();
 
@@ -239,9 +227,9 @@ async function endGiveaway(giveawayId) {
     }
 
     try {
-        const channel = await client.channels.fetch(CHANNELS.GIVEAWAYS).catch(() => null);
+        const channel = await client.channels.fetch(giveaway.channelId).catch(() => null);
         if (!channel) {
-            console.error(`Giveaway channel ${CHANNELS.GIVEAWAYS} not found`);
+            console.error(`Giveaway channel ${giveaway.channelId} not found`);
             return;
         }
 
@@ -255,7 +243,7 @@ async function endGiveaway(giveawayId) {
             // Cancel giveaway - not enough participants
             const cancelEmbed = new EmbedBuilder()
                 .setTitle('❌ Giveaway Cancelled')
-                .setDescription(`**${giveaway.item}${giveaway.quantity > 1 ? ` ×${giveaway.quantity}` : ''}** was cancelled.\nThe required minimum number of participants was not reached.`)
+                .setDescription(`**${giveaway.item}${giveaway.quantity > 1 ? ` ×${giveaway.quantity}` : ''}** was cancelled.\nThe required minimum of ${giveaway.minParticipants} participants was not reached. ${giveaway.participants.length} users participated.`)
                 .setColor(0xff0000)
                 .setTimestamp();
 
@@ -264,20 +252,23 @@ async function endGiveaway(giveawayId) {
                 components: [] 
             });
 
-            // Send cancellation message to announcements
-            const announcementChannel = await client.channels.fetch(CHANNELS.ANNOUNCEMENTS).catch(() => null);
+            // Send cancellation message to announcements with participant mention
+            const announcementChannel = await client.channels.fetch('1392122107390857266').catch(() => null); // Fixed ID for now
             if (announcementChannel) {
+                const participantMentions = giveaway.participants.slice(0, 10).map(id => `<@${id}>`).join(', ') || 'No participants';
+                const moreParticipants = giveaway.participants.length > 10 ? `, and ${giveaway.participants.length - 10} more` : '';
+
                 await announcementChannel.send({
                     content: `<@&${ROLES.GIVEAWAY}>`,
                     embeds: [new EmbedBuilder()
                         .setTitle('❌ Giveaway Cancelled')
-                        .setDescription(`Unfortunately, the giveaway **${giveaway.item}${giveaway.quantity > 1 ? ` ×${giveaway.quantity}` : ''}** was cancelled.\nThe required minimum number of participants was not reached.\n\nWe're sorry to those who joined. A new giveaway will be available soon!`)
+                        .setDescription(`Unfortunately, the giveaway **${giveaway.item}${giveaway.quantity > 1 ? ` ×${giveaway.quantity}` : ''}** was cancelled.\nThe required minimum of ${giveaway.minParticipants} participants was not reached. Participants: ${participantMentions}${moreParticipants}.\nWe’re sorry to those who joined. A new giveaway will be available soon!`)
                         .setColor(0xff0000)
                         .setTimestamp()
                     ]
                 });
             } else {
-                console.error(`Announcement channel ${CHANNELS.ANNOUNCEMENTS} not found`);
+                console.error(`Announcement channel not found`);
             }
 
         } else {
@@ -318,12 +309,12 @@ async function endGiveaway(giveawayId) {
             }
 
             // Post public winner announcement
-            const winnersChannel = await client.channels.fetch(CHANNELS.WINNERS).catch(() => null);
+            const winnersChannel = await client.channels.fetch('1396578011834355952').catch(() => null); // Fixed ID for now
             if (winnersChannel) {
                 const announcementEmbed = createWinnerAnnouncementEmbed(giveaway, winners);
                 await winnersChannel.send({ embeds: [announcementEmbed] });
             } else {
-                console.error(`Winners channel ${CHANNELS.WINNERS} not found`);
+                console.error(`Winners channel not found`);
             }
         }
 
@@ -424,15 +415,6 @@ client.once('ready', async () => {
     await loadData();
     await registerCommands();
     
-    // Validate channels and roles
-    for (const [key, id] of Object.entries(CHANNELS)) {
-        try {
-            await client.channels.fetch(id);
-            console.log(`Channel ${key} (${id}) validated`);
-        } catch {
-            console.error(`Channel ${key} (${id}) not found or inaccessible`);
-        }
-    }
     try {
         const guild = client.guilds.cache.first();
         await guild.roles.fetch(ROLES.GIVEAWAY);
@@ -476,53 +458,21 @@ client.on('interactionCreate', async interaction => {
             }
 
             if (commandName === 'creategiveaway') {
-                // Create a modal for giveaway creation
+                // Initial modal to guide the user
                 const modal = new ModalBuilder()
-                    .setCustomId('createGiveawayModal')
-                    .setTitle('Create a New Giveaway');
+                    .setCustomId('initGiveawayModal')
+                    .setTitle('Initialize New Giveaway');
 
-                // Add input fields
-                const itemInput = new TextInputBuilder()
-                    .setCustomId('itemInput')
-                    .setLabel('Item to Giveaway')
-                    .setStyle(TextInputStyle.Short)
-                    .setRequired(true);
+                const guideInput = new TextInputBuilder()
+                    .setCustomId('guideInput')
+                    .setLabel('Select a channel in the next step')
+                    .setStyle(TextInputStyle.Paragraph)
+                    .setRequired(false)
+                    .setValue('Please confirm to proceed and choose a channel below.');
 
-                const quantityInput = new TextInputBuilder()
-                    .setCustomId('quantityInput')
-                    .setLabel('Quantity')
-                    .setStyle(TextInputStyle.Short)
-                    .setRequired(true);
+                const firstRow = new ActionRowBuilder().addComponents(guideInput);
+                modal.addComponents(firstRow);
 
-                const winnersInput = new TextInputBuilder()
-                    .setCustomId('winnersInput')
-                    .setLabel('Number of Winners')
-                    .setStyle(TextInputStyle.Short)
-                    .setRequired(true);
-
-                const durationInput = new TextInputBuilder()
-                    .setCustomId('durationInput')
-                    .setLabel('Duration (e.g., 1h 30m, 2d 4h)')
-                    .setStyle(TextInputStyle.Short)
-                    .setRequired(true);
-
-                const minParticipantsInput = new TextInputBuilder()
-                    .setCustomId('minParticipantsInput')
-                    .setLabel('Minimum Participants (optional)')
-                    .setStyle(TextInputStyle.Short)
-                    .setRequired(false);
-
-                // Create action rows for the inputs
-                const firstRow = new ActionRowBuilder().addComponents(itemInput);
-                const secondRow = new ActionRowBuilder().addComponents(quantityInput);
-                const thirdRow = new ActionRowBuilder().addComponents(winnersInput);
-                const fourthRow = new ActionRowBuilder().addComponents(durationInput);
-                const fifthRow = new ActionRowBuilder().addComponents(minParticipantsInput);
-
-                // Add rows to the modal
-                modal.addComponents(firstRow, secondRow, thirdRow, fourthRow, fifthRow);
-
-                // Show the modal
                 await interaction.showModal(modal);
 
             } else if (commandName === 'globalimage') {
@@ -562,10 +512,9 @@ client.on('interactionCreate', async interaction => {
                 if (newQuantity) giveaway.quantity = newQuantity;
                 if (newWinners) giveaway.winners = newWinners;
 
-                // Update the message
-                const channel = await client.channels.fetch(CHANNELS.GIVEAWAYS).catch(() => null);
+                const channel = await client.channels.fetch(giveaway.channelId).catch(() => null);
                 if (!channel) {
-                    return interaction.reply({ content: `❌ Giveaway channel (${CHANNELS.GIVEAWAYS}) not found.`, ephemeral: true });
+                    return interaction.reply({ content: `❌ Giveaway channel (${giveaway.channelId}) not found.`, ephemeral: true });
                 }
 
                 const message = await channel.messages.fetch(giveaway.messageId).catch(() => null);
@@ -594,10 +543,9 @@ client.on('interactionCreate', async interaction => {
 
                 giveaway.minParticipants = newMinParticipants;
 
-                // Update the message
-                const channel = await client.channels.fetch(CHANNELS.GIVEAWAYS).catch(() => null);
+                const channel = await client.channels.fetch(giveaway.channelId).catch(() => null);
                 if (!channel) {
-                    return interaction.reply({ content: `❌ Giveaway channel (${CHANNELS.GIVEAWAYS}) not found.`, ephemeral: true });
+                    return interaction.reply({ content: `❌ Giveaway channel (${giveaway.channelId}) not found.`, ephemeral: true });
                 }
 
                 const message = await channel.messages.fetch(giveaway.messageId).catch(() => null);
@@ -633,7 +581,6 @@ client.on('interactionCreate', async interaction => {
                     return interaction.reply({ embeds: [noParticipantsEmbed], ephemeral: true });
                 }
 
-                // Create chunks of participants (Discord embed field limit is 1024 characters)
                 const participantChunks = [];
                 let currentChunk = '';
                 
@@ -658,7 +605,6 @@ client.on('interactionCreate', async interaction => {
                     .setColor(0x00ff00)
                     .setTimestamp();
 
-                // Add participant fields (max 25 fields per embed)
                 participantChunks.slice(0, 5).forEach((chunk, index) => {
                     participantsEmbed.addFields({
                         name: index === 0 ? '👥 Participants' : `👥 Participants (cont'd ${index + 1})`,
@@ -685,10 +631,9 @@ client.on('interactionCreate', async interaction => {
                         { name: '/listparticipants', value: 'Show the list of all participants in a giveaway', inline: false },
                         { name: '/help', value: 'Show this help message', inline: false }
                     )
-                    .setFooter({ text: 'All giveaways are posted in #🎉┃giveaways and winners announced in #🏆┃winners' })
+                    .setFooter({ text: 'Giveaways are posted in the selected channel and winners announced in #🏆┃winners' })
                     .setTimestamp();
 
-                // Show different message based on permissions
                 if (interaction.member && hasAuthorizedRole(interaction.member)) {
                     helpEmbed.setDescription('📋 **Available Commands** (You have admin access)');
                 } else {
@@ -698,15 +643,91 @@ client.on('interactionCreate', async interaction => {
                 await interaction.reply({ embeds: [helpEmbed], ephemeral: true });
             }
 
+        } else if (interaction.isModalSubmit() && interaction.customId === 'initGiveawayModal') {
+            await interaction.deferReply({ ephemeral: true });
+
+            const guild = interaction.guild;
+            const channels = await guild.channels.fetch();
+            const textChannels = channels.filter(channel => channel.type === 0 && channel.permissionsFor(interaction.user).has('SEND_MESSAGES'));
+
+            const channelSelect = new StringSelectMenuBuilder()
+                .setCustomId('channelSelect')
+                .setPlaceholder('Choose a channel for the giveaway')
+                .addOptions(
+                    textChannels.map(channel => ({
+                        label: channel.name,
+                        description: `Channel: #${channel.name}`,
+                        value: channel.id,
+                    }))
+                );
+
+            const row = new ActionRowBuilder().addComponents(channelSelect);
+
+            await interaction.editReply({
+                content: 'Please select the channel for your giveaway:',
+                components: [row],
+                ephemeral: true
+            });
+
+        } else if (interaction.isStringSelectMenu() && interaction.customId === 'channelSelect') {
+            const channelId = interaction.values[0];
+            const channel = await interaction.guild.channels.fetch(channelId);
+
+            if (!channel || channel.type !== 0 || !channel.permissionsFor(interaction.user).has('SEND_MESSAGES')) {
+                return interaction.update({ content: '❌ Invalid channel selection or insufficient permissions.', components: [] });
+            }
+
+            const modal = new ModalBuilder()
+                .setCustomId('createGiveawayModal')
+                .setTitle('Create a New Giveaway');
+
+            const itemInput = new TextInputBuilder()
+                .setCustomId('itemInput')
+                .setLabel('Item to Giveaway')
+                .setStyle(TextInputStyle.Short)
+                .setRequired(true);
+
+            const quantityInput = new TextInputBuilder()
+                .setCustomId('quantityInput')
+                .setLabel('Quantity')
+                .setStyle(TextInputStyle.Short)
+                .setRequired(true);
+
+            const winnersInput = new TextInputBuilder()
+                .setCustomId('winnersInput')
+                .setLabel('Number of Winners')
+                .setStyle(TextInputStyle.Short)
+                .setRequired(true);
+
+            const durationInput = new TextInputBuilder()
+                .setCustomId('durationInput')
+                .setLabel('Duration (e.g., 1h 30m, 2d 4h)')
+                .setStyle(TextInputStyle.Short)
+                .setRequired(true);
+
+            const minParticipantsInput = new TextInputBuilder()
+                .setCustomId('minParticipantsInput')
+                .setLabel('Minimum Participants (optional)')
+                .setStyle(TextInputStyle.Short)
+                .setRequired(false);
+
+            const firstRow = new ActionRowBuilder().addComponents(itemInput);
+            const secondRow = new ActionRowBuilder().addComponents(quantityInput);
+            const thirdRow = new ActionRowBuilder().addComponents(winnersInput);
+            const fourthRow = new ActionRowBuilder().addComponents(durationInput);
+            const fifthRow = new ActionRowBuilder().addComponents(minParticipantsInput);
+
+            modal.addComponents(firstRow, secondRow, thirdRow, fourthRow, fifthRow);
+
+            await interaction.showModal(modal);
+
         } else if (interaction.isModalSubmit() && interaction.customId === 'createGiveawayModal') {
-            // Handle modal submission
             const item = interaction.fields.getTextInputValue('itemInput');
             const quantity = parseInt(interaction.fields.getTextInputValue('quantityInput'));
             const winners = parseInt(interaction.fields.getTextInputValue('winnersInput'));
             const durationStr = interaction.fields.getTextInputValue('durationInput');
             const minParticipants = interaction.fields.getTextInputValue('minParticipantsInput') ? parseInt(interaction.fields.getTextInputValue('minParticipantsInput')) : 3;
 
-            // Validate inputs
             if (isNaN(quantity) || quantity < 1) {
                 return interaction.reply({ content: '❌ Quantity must be a positive number.', ephemeral: true });
             }
@@ -719,6 +740,11 @@ client.on('interactionCreate', async interaction => {
             }
             if (minParticipants && (isNaN(minParticipants) || minParticipants < 1)) {
                 return interaction.reply({ content: '❌ Minimum participants must be a positive number.', ephemeral: true });
+            }
+
+            const channelId = interaction.message.interaction?.message?.components[0]?.components[0]?.data?.options?.find(opt => opt.default)?.value;
+            if (!channelId) {
+                return interaction.reply({ content: '❌ Channel selection is missing. Please restart the command.', ephemeral: true });
             }
 
             giveawayCounter++;
@@ -735,7 +761,8 @@ client.on('interactionCreate', async interaction => {
                 participants: [],
                 minParticipants,
                 createdBy: interaction.user.id,
-                createdAt: Date.now()
+                createdAt: Date.now(),
+                channelId: channelId
             };
 
             const embed = createGiveawayEmbed(giveaway);
@@ -747,9 +774,9 @@ client.on('interactionCreate', async interaction => {
                         .setStyle(ButtonStyle.Primary)
                 );
 
-            const channel = await client.channels.fetch(CHANNELS.GIVEAWAYS).catch(() => null);
+            const channel = await client.channels.fetch(channelId).catch(() => null);
             if (!channel) {
-                return interaction.reply({ content: `❌ Giveaway channel (${CHANNELS.GIVEAWAYS}) not found.`, ephemeral: true });
+                return interaction.reply({ content: '❌ The specified channel was not found or is inaccessible.', ephemeral: true });
             }
 
             const message = await channel.send({ embeds: [embed], components: [row] });
@@ -758,7 +785,6 @@ client.on('interactionCreate', async interaction => {
             activeGiveaways.set(giveawayId, giveaway);
             await saveData();
 
-            // Set timer to end giveaway
             setTimeout(() => endGiveaway(giveawayId), duration);
 
             await interaction.reply({ content: `✅ Giveaway created! ID: \`${giveawayId}\``, ephemeral: true });
@@ -779,11 +805,9 @@ client.on('interactionCreate', async interaction => {
                 giveaway.participants.push(interaction.user.id);
                 await saveData();
 
-                // Update the embed with new participant count
                 const updatedEmbed = createGiveawayEmbed(giveaway);
                 await interaction.update({ embeds: [updatedEmbed] });
 
-                // Send confirmation DM
                 try {
                     const confirmEmbed = new EmbedBuilder()
                         .setTitle('✅ Participation Confirmed')
@@ -815,7 +839,6 @@ process.on('unhandledRejection', error => {
     console.error('Unhandled promise rejection:', error);
 });
 
-// Validate environment variables and login
 (async () => {
     if (!process.env.DISCORD_TOKEN) {
         console.error('Error: DISCORD_TOKEN is not defined in environment variables');
